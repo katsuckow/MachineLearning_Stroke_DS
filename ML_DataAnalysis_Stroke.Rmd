@@ -1,0 +1,827 @@
+---
+title: 'Machine Learning: Imbalanced Stroke Dataset'
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-11-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(error = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, results='hide'}
+#reticulate::py_install("scikit-learn", pip = TRUE)
+library(reticulate)
+py_config()
+```
+
+
+
+```{python, warning=FALSE, results='hide'}
+import sys
+assert sys.version_info >= (3, 7)
+import sklearn #"scikit-learn"
+assert sklearn.__version__ >= "1.2"
+import numpy as np
+import pandas as pd
+import matplotlib as plt
+import matplotlib.pyplot as plt
+from pandas.plotting import scatter_matrix
+#assert pd.__version__ >="1.5.0"
+
+from sklearn.preprocessing import OneHotEncoder
+import seaborn as sns
+```
+
+# Decision Tree and Random Forest: Stroke or no Stroke?
+
+## Assessing the risk of a stroke from an imbalanced dataset
+
+The "health-care-dataset-stroke-data.csv" from kaggle is a dataset from Kaggle that classifies patients who had a stroke from patients that didnet have a stroke and some other health conditions. This short report shows a model that will assess the risk of a stroke given health conditions that are present in the current database.
+
+Such a model can be critical to infer patients health risks given, e.g. age or blood sugar to assess whether preventative measures should be advised and started. 
+
+## Initial thoughts
+
+What could be possible criteria for such a model? There are aspects in such a model that are more important than simple precision. Assessing a risk can be a bit like signal detection theory. The metrics from signal detection are usually presented in a confusion matrix with: 1. True positives (correctly identifies a positive case), 2. True negatives (correctly identifies a negative case), 3. False positives (incorrectly identifies a positive case) and 4. False negatives (incorrectly identifies a negative case).
+
+However, fur the purpose of assessing a stroke risk and for a medical practicioner to make a meaningful decision some of the metrics from signal detection theory are more crucial than others. Correctly assessing a patient in time can help save the patients life. Thus, for our model to work, it is crucial it returns as little __false negatives__ as possible. Missing a patients risk for a stroke can have to most severe consequences. __False positives__ are less severe since they might indicate that risk factors are met, which not necessarily lead to a stroke. However, the biggest risk for that patient when applying preventative measures might be side effects from medication.  
+
+
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+
+import pandas as pd
+import numpy as np
+
+# lies CSV Daten ein
+df = pd.read_csv('healthcare-dataset-stroke-data.csv',
+                 encoding='utf-8',  
+                 delimiter=',',     
+                 header=0)
+pd.set_option("display.max_columns", None)
+
+# ID column wird aus Datensatz entfernt
+df = df.iloc[:,1:]
+
+print("Spaltennamen","\n",df.columns,"\n")
+df_empty = df[df.isnull().any(axis=1) ]
+
+print(df["work_type"].value_counts(),"\n")
+print(df["Residence_type"].value_counts(),"\n")
+print("Fehlende BMI Werte",df["bmi"].isnull().sum(),"\n")
+print(df["smoking_status"].value_counts(),"\n")
+print(df["ever_married"].value_counts(),"\n")
+# Smoking status für Kinder unter 20 
+print("value counts smoking in the young","\n",df[(df['age'].astype(np.int8) < 20)]["smoking_status"].value_counts())
+
+# print(df_empty)
+
+```
+
+# Thorough Analysis of the Data
+
+Check the data and the various distributions of information for stroke vs. no-stroke patients in the dataset.
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+
+df_stroke = df[df['stroke'].astype(np.int8) == 1]
+print(df_stroke.shape)
+df_Nostroke = df[df['stroke'].astype(np.int8) == 0]
+print(df_Nostroke.shape)
+
+```
+
+
+There is a strong imbalance in the dataset with only 250 stroke patients in comparison with 4861 patients, who haven't had a stroke (yet).
+That is why the data will have to be stratified for the train-test-split, ensuring that the same distribution of the various factors appears in the trainings and the test set. Due to their small number, their should be more weight on the data of the stroke patients.
+
+These are the following column names and data types in the dataset:
+
+```{python, echo=FALSE}
+print("Spaltennamen",df.columns)
+```
+
+
+**Column Assessment**
+1. How useful are the columns for the purpose of this model? 
+2. What kind of information can their information provide?
+3. How could the labels be interpreted?
+
+## Medical information
+
+These seem to be information directly associated with medical conditions.
+
+**age** numerical -- useful information,
+- the likelihood of a stroke increases with age.
+
+**glucose level** numerical -- useful information
+- increased glucose levels harm the blood vessel, which can lead to clots and thus can induce a stroke.
+
+**hypertension** categorical -- useful information
+- medication that treats hypertension, can also decrease the risk for a stroke 
+
+**heart disease** categorical -- sinnvolle Spalte für Fragestellung
+- most heart disease a connected with a risk for stroke
+$\rightarrow$ heart disease can lead to blood clots which can lead to a stroke
+
+**bmi** numerical -- useful for assessment of risk for a stroke
+- $\rightarrow$ correlation with diabetes and hypertension, which are established risk factors of a stroke.
+- lots of missing values for bmi: 201 missing from dataset that is 5110 in size
+$\rightarrow$ transpute missing values
+
+**Smoking Status** categorical -- use to assess risk for a stroke
+- arterial constriction might cause blood clots which then could lead to strokes
+
+- There are a lot of children in the dataset and only 2 children with a stroke:
+  - considersegmentation of the data should be considered:
+  -$\rightarrow$ maybe consider only data without the children
+
+## Stress factors
+
+All the other columns appear to be related to some form of potential stress factors (ever married, gender, work type, residence type (urban or rural)). However, the labeling is unclear and the interpretation of the results are somewhat spurious. A Label like _ever married_ is difficult to interpret since its meaning is far to broad and vague (does it mean: recently married, divorced, recently divorced, long-time divorced, long-time married?). The different statuses of _ever married_ will have decidedly different effect on the stress levels.
+
+# Separation of data into stroke and no-stroke patients
+
+Correlation plots of the numerical data for all patients vs stroke patients
+
+
+```{python, echo=FALSE, include=FALSE, warning=FALSE, results='hide'}
+
+
+import matplotlib
+matplotlib.use("Agg")           # no interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import clear_output, display, Image
+import cv2 as cv
+
+
+attributes = ["age", "avg_glucose_level", "bmi"]
+
+plt.ioff() 
+
+# pairplot with regression lines and confidence intervals
+g = sns.pairplot(df[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+
+g.fig.suptitle('All Patients', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+# Add regression lines with confidence intervals
+g.map_upper(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+
+clear_output(wait=True)   # remove previously-rendered figures in the cell
+display(g.fig)            # or use plt.show() after clear_output
+plt.close(g.fig)
+plt.ion()
+
+g.fig.savefig("pairplot_final.png", bbox_inches="tight", dpi=150)
+
+plt.close(g.fig)
+
+
+attributes = ["age", "avg_glucose_level", "bmi"]
+
+plt.ioff() 
+
+# Using seaborn's pairplot with regression lines and confidence intervals
+g = sns.pairplot(df_stroke[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+
+g.fig.suptitle('Stroke Patients', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+# Add regression lines with confidence intervals
+g.map_upper(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+
+clear_output(wait=True)   # remove previously-rendered figures in the cell
+display(g.fig)            # or use plt.show() after clear_output
+plt.close(g.fig)
+plt.ion()
+
+g.fig.savefig("pairplot_final1.png", bbox_inches="tight", dpi=150)
+
+plt.close(g.fig)
+
+
+plt.show()
+```
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+pairplot_all = cv.imread("pairplot_final.png")
+
+# Convert the image from BGR to RGB
+pairplot_all = cv.cvtColor(pairplot_all, cv.COLOR_BGR2RGB)
+
+pairplot_all1 = cv.imread("pairplot_final1.png")
+
+# Convert the image from BGR to RGB
+pairplot_all1 = cv.cvtColor(pairplot_all1, cv.COLOR_BGR2RGB)
+
+
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+axes[0].imshow(pairplot_all)
+axes[0].axis('off')
+axes[0].set_title('No Stroke Patients')
+axes[1].imshow(pairplot_all1)
+axes[1].axis('off')
+axes[1].set_title('Stroke Patients')
+plt.tight_layout()
+plt.show()
+
+```
+
+- side-by-side the plots show the big imbalance of the data between both groups (no-stroke vs stroke)
+
+- all three columns show different patterns,
+
+- glucose levels it is noteworthy that stroke patients seem to be separated into 2 groups
+$\rightarrow$ high $\leftrightarrow$ low blood sugar 
+
+- age appears to be a huge risk factor for having a stroke: 
+
+## Age distribution
+
+**Comparison**
+
+1. age distribution
+2. no-stroke patients
+3. stroke patiens
+
+```{python, echo=FALSE, results='hide', warning=FALSE}
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+# First histogram - All patients
+ax1.hist(df["age"], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+ax1.set_xlabel('Alter')
+ax1.set_ylabel('Häufigkeit')
+ax1.set_title('Alle Patienten - Altersverteilung')
+ax1.grid(True, alpha=0.3)
+
+
+ax2.hist(df_Nostroke["age"], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+ax2.set_xlabel('Alter')
+ax2.set_ylabel('Häufigkeit')
+ax2.set_title('Gesunde Patienten - Altersverteilung')
+ax2.grid(True, alpha=0.3)
+
+
+# Second histogram - Stroke patients
+ax3.hist(df_stroke["age"], bins=30, alpha=0.7, color='lightcoral', edgecolor='black')
+ax3.set_xlabel('Alter')
+ax3.set_ylabel('Häufigkeit')
+ax3.set_title('Schlaganfall Patienten - Altersverteilung')
+ax3.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+
+**Observation children**: 
+- the data set contains 1025 children under the age of 20
+$\rightarrow$ there are only 2 children in the stroke group
+- in addition there shouldnt be too many smokers in the children group
+
+
+```{python}
+
+print("Allgmeine Info zu Smoking Status","\n",df["smoking_status"].value_counts(),"\n")
+
+# print out the value counts for the smoking status column for people below 20
+print("Info zum smoking bei Kindern unter 20:","\n",df[(df['age'].astype(np.int8) < 20)]["smoking_status"].value_counts())
+print("Work Type:","\n",df["work_type"].value_counts())
+
+```
+
+# Level of glucose distribution 
+
+Comparison 
+1. all patients
+2. no-stroke patients
+3. stroke patients
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+ax1.hist(df["avg_glucose_level"], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+ax1.set_xlabel('Average Glucose Level all')
+ax1.set_ylabel('Frequency')
+ax1.set_title('all patients - glucose distribution')
+ax1.grid(True, alpha=0.3)
+
+ax2.hist(df_Nostroke["avg_glucose_level"], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+ax2.set_xlabel('Average Glucose Level No Stroke')
+ax2.set_ylabel('Häufigkeit')
+ax2.set_title('No-stroke patient - glucose distribution')
+ax2.grid(True, alpha=0.3)
+
+
+ax3.hist(df_stroke["avg_glucose_level"], bins=30, alpha=0.7, color='lightcoral', edgecolor='black')
+ax3.set_xlabel('Average Glucose Level Stroke')
+ax3.set_ylabel('Frequency')
+ax3.set_title('Stroke patients - glucose distribution')
+ax3.grid(True, alpha=0.3)
+plt.show()
+```
+
+There are spikes in glucose levels for low glucose and for high glucose in the stroke group. This might be not too surprising since there are two types of diabetes related with glucose levels. Diabetes associated with low glucose (hypoglycemia) and with high glucose (hyperglycemia) levels.
+This polynomial distribution is also visible in the plots. To further analyse, patients have been separated into three groups.
+
+1. low glucose level
+2. normal glucose level
+3. high glucose level
+
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide', include=FALSE}
+
+df_lowsugar = df_stroke[df_stroke["avg_glucose_level"] <= 85]
+#print(df_lowsugar.shape, df_lowsugar["stroke"].value_counts())
+df_normalsugar = df_stroke[(df_stroke["avg_glucose_level"] > 85) & (df_stroke["avg_glucose_level"] <120)]
+#print(df_normalsugar.shape, df_normalsugar["stroke"].value_counts())
+df_highsugar = df_stroke[(df_stroke["avg_glucose_level"] >= 120)]
+#print(df_highsugar.shape, df_highsugar["stroke"].value_counts())
+
+df_lowsugar_all = df[df["avg_glucose_level"] <= 85]
+df_normalsugar_all = df[(df["avg_glucose_level"] > 85) & (df_stroke["avg_glucose_level"] < 120)]
+df_highsugar_all = df[(df["avg_glucose_level"] >= 120)]
+
+```
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+corr_lowsugar = pd.DataFrame(df_lowsugar.corr(numeric_only = True))
+#print(corr_lowsugar, corr_lowsugar.shape)
+corr_normalsugar = pd.DataFrame(df_normalsugar.corr(numeric_only = True))
+#print(corr_normalsugar, corr_normalsugar.shape)
+corr_highsugar = pd.DataFrame(df_highsugar.corr(numeric_only = True))
+#print(corr_highsugar,corr_highsugar.shape)
+```
+
+```{python, echo=FALSE, warning=FALSE,results='hide', include=FALSE}
+
+import matplotlib
+matplotlib.use("Agg")           # no interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import clear_output, display, Image
+import cv2 as cv
+
+
+attributes = ["age", "avg_glucose_level", "bmi"]
+
+plt.ion()
+
+# Using seaborn's pairplot with regression lines and confidence intervals
+g = sns.pairplot(df_lowsugar[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+
+g.fig.suptitle('Low Sugar Stroke Patients', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+# Add regression lines with confidence intervals
+g.map_upper(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+
+clear_output(wait=True)   # remove previously-rendered figures in the cell
+display(g.fig)            # or use plt.show() after clear_output
+plt.close(g.fig)
+plt.ion()
+
+g.fig.savefig("low_sugar_corr.png", bbox_inches="tight", dpi=150)
+
+
+plt.ioff()
+
+
+g = sns.pairplot(df_normalsugar[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+g.fig.suptitle('Normal Sugar Stroke Patients', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+g.map_upper(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+
+clear_output(wait=True)   # remove previously-rendered figures in the cell
+display(g.fig)            # or use plt.show() after clear_output
+plt.close(g.fig)
+plt.ion()
+
+g.fig.savefig("normal_sugar_corr.png", bbox_inches="tight", dpi=150)
+
+plt.ioff()
+
+g = sns.pairplot(df_highsugar[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+g.fig.suptitle('High Sugar Stroke Patients', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+g.map_upper(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='lightcoral', line_kws={'linestyle': '--'})
+
+clear_output(wait=True)   # remove previously-rendered figures in the cell
+display(g.fig)            # or use plt.show() after clear_output
+plt.close(g.fig)
+plt.ion()
+
+g.fig.savefig("high_sugar_corr.png", bbox_inches="tight", dpi=150)
+
+```
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+
+low_sugar_corr = cv.imread("low_sugar_corr.png")
+
+# Convert the image from BGR to RGB
+low_sugar_corr = cv.cvtColor(low_sugar_corr, cv.COLOR_BGR2RGB)
+
+normal_sugar_corr = cv.imread("normal_sugar_corr.png")
+
+# Convert the image from BGR to RGB
+normal_sugar_corr = cv.cvtColor(normal_sugar_corr, cv.COLOR_BGR2RGB)
+
+high_sugar_corr = cv.imread("high_sugar_corr.png")
+
+# Convert the image from BGR to RGB
+high_sugar_corr = cv.cvtColor(high_sugar_corr, cv.COLOR_BGR2RGB)
+
+
+
+fig, axes = plt.subplots(1, 3, figsize=(8, 4))
+axes[0].imshow(low_sugar_corr)
+axes[0].axis('off')
+axes[0].set_title('Low Sugar Patients')
+axes[1].imshow(normal_sugar_corr)
+axes[1].axis('off')
+axes[1].set_title('Normal Sugar Patients')
+axes[2].imshow(high_sugar_corr)
+axes[2].axis('off')
+axes[2].set_title('High Sugar Patients')
+
+plt.tight_layout()
+plt.show()
+
+
+
+```
+
+
+
+# Noteworthy Findings
+
+Stroke patients have been separated into 3 glucose level groups: low, normal and high. It is interesting to see that the correlation between glucose and the bmi is reversed: with the correlation between low_glucose x bmi being negative (the lower the glucose the higher the bmi) and high_glucose x bmi being positive (the higher the glucose the higher the bmi).
+
+This information about the different effects from the glucose level must be integrated with the Machine Learning Analysis later.
+
+Further group comparisons follow.
+
+
+```{python, echo=FALSE, eval=FALSE, warning=FALSE, results='hide'}
+# 3 Gruppeneinteilungen Glucose über alle Patienten verteilt
+
+attributes = ["age", "avg_glucose_level", "bmi"]
+
+# Scatterplots with regression lines and confidence intervals
+g = sns.pairplot(df_lowsugar_all[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+
+g.fig.suptitle('Low Sugar Patients - all', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+g.map_upper(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+
+plt.show()
+
+g = sns.pairplot(df_normalsugar_all[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+g.fig.suptitle('Normal Sugar Patients - all', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+g.map_upper(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+
+plt.show()
+
+g = sns.pairplot(df_highsugar_all[attributes], 
+                 diag_kind='hist',
+                 plot_kws={'alpha': 0.6, 's': 30},
+                 height=1.5)
+g.fig.suptitle('High Sugar Patients - all', 
+               y=1.05, fontsize=14, fontweight='bold')
+
+g.map_upper(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+g.map_lower(sns.regplot, scatter=False, color='red', line_kws={'linestyle': '--'})
+
+plt.show()
+```
+
+## Barplots Heart Disease
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+heart_disease = df["heart_disease"].value_counts()
+heart_disease_Nostroke = df_Nostroke["heart_disease"].value_counts()
+heart_disease_stroke = df_stroke["heart_disease"].value_counts()
+
+
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+ax1.bar(["no heart disease","heart disease"],heart_disease)
+ax1.set_xlabel('heart disease all')
+ax1.set_ylabel('sum')
+ax1.set_title('Heart disease all')
+
+ax2.bar(["no heart disease","heart disease"],heart_disease_Nostroke)
+ax2.set_xlabel('Heart healthy')
+ax2.set_ylabel('sum')
+ax2.set_title('Heart disease no stroke')
+
+
+ax3.bar(["no heart disease","heart disease"],heart_disease_stroke,color='lightcoral')
+ax3.set_xlabel('Heart disease stroke')
+ax3.set_ylabel('sum')
+ax3.set_title('Heart disease stroke')
+ax3.grid(True, alpha=0.3)
+plt.show()
+
+```
+
+## Barplots Smoking Status
+
+
+```{python}
+
+smoke_stroke = df_stroke["smoking_status"].value_counts()
+smoke_Nostroke = df_Nostroke["smoking_status"].value_counts()
+smoke_all = df["smoking_status"].value_counts()
+
+fig, (ax1, ax2,ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+ax1.bar(["never smoked","unkown","formerly smoked","smokes"],smoke_all)
+ax1.set_xlabel('smoking')
+ax1.set_ylabel('sum')
+ax1.set_title('Smoking All')
+
+
+ax2.bar(["never smoked","unkown","formerly smoked","smokes"],smoke_Nostroke)
+ax2.set_xlabel('smoking')
+ax2.set_ylabel('sum')
+ax2.set_title('Smoking Nostroke')
+
+ax3.bar(["never smoked","unkown","formerly smoked","smokes"],smoke_stroke,color='lightcoral')
+ax3.set_xlabel('smoking')
+ax3.set_ylabel('sum')
+ax3.set_title('Smoking Stroke')
+ax3.grid(True, alpha=0.3)
+plt.show()
+
+```
+
+## Barplots Hypertension
+
+```{python}
+tension_stroke = df_stroke["hypertension"].value_counts()
+tension_Nostroke = df_Nostroke["hypertension"].value_counts()
+tension_all = df["hypertension"].value_counts()
+
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+ax1.bar(["no hypertension","hypertension"],tension_all)
+ax1.set_xlabel('tension')
+ax1.set_ylabel('sum')
+ax1.set_title('Hypertension All')
+
+ax2.bar(["no hypertension","hypertension"],tension_Nostroke)
+ax2.set_xlabel('tension')
+ax2.set_ylabel('sum')
+ax2.set_title('Hypertension Nostroke')
+
+ax3.bar(["no hypertension","hypertension"],tension_stroke,color='lightcoral')
+ax3.set_xlabel('tension')
+ax3.set_ylabel('sum')
+ax3.set_title('Hypertension Stroke')
+ax3.grid(True, alpha=0.3)
+plt.show()
+```
+
+
+
+# Decision Tree for Analysis
+
+**Advantages**
+
+- **+** filter of relevant columnsrelevante Spalten lassen sich herausfiltern
+- **+** for classification task
+- **+** overfitting can be controlled
+
+**Nachteil**
+- **-** risk of bias when data is not homogeneous
+$\rightarrow$ since data is very imbalanced, this risk must be considered when assessing the results
+
+I've used Decision Tree with a Gridsearch, stratifying the data in preparation. Additionally, glucose levels were separated into 3 groups (low: below 85, medium: between 85 and 120, high: above 120). Using one-hot encoders, glucose levels were categorized. 
+
+```{python,eval=FALSE,warning=FALSE, results='hide'}
+# train-test split method
+# split data into trainings and test set using stratification to make sure that the target (troke patients)  have the same distribution for trainingsset and testset  
+# 20 % of the data for testset and 80% of the data for training
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# Define the order for ordinal encoding
+category_orders = [
+    ["Male", "Female"],
+    ["No", "Yes"],
+    ['children', 'Govt_job', 'Private', 'Self-employed', 'Never_worked'], # ordered by estimated stress level
+    ["Rural", "Urban"],
+    ["never smoked", "formerly smoked", "smokes"],
+]
+
+# column transformer for categorical columns
+transformer_category_columns = ColumnTransformer(
+
+transformers=[
+    (
+        "ordinal_encoder",
+        OrdinalEncoder(
+            categories=category_orders,
+            handle_unknown="use_encoded_value",
+            unknown_value=np.nan,
+        ),
+        [0, 4, 5, 6, 9],  # Indices of categorical columns to encode
+    ),
+    (
+        "onehot_encoder",
+        OneHotEncoder(
+            categories="auto",
+            handle_unknown="ignore",  # recommended to avoid errors at inference  # optional: returns dense arrays
+        ),
+        [10, 11, 12], # one hot encoder for additional 3 columns -- three different glucose levels
+    ),
+],
+remainder="passthrough",
+)
+
+# complete data preparation pipeline
+data_preparation_pipeline = Pipeline(
+    steps=[
+        ("transformer_category_columns", transformer_category_columns),
+        ("str_to_float", FunctionTransformer(lambda X: np.where(X == 'N/A', 'nan', X).astype(float))),
+        ("scaler", MinMaxScaler()),
+        ("imputer", KNNImputer(n_neighbors=10)),
+    ]
+)
+
+# prepare the training and test data
+X_train_prepared = data_preparation_pipeline.fit_transform(X_train)
+X_test_prepared = data_preparation_pipeline.transform(X_test)
+
+```
+
+**Code for Decision Tree Implementation**
+
+```{python, eval=FALSE, warning=FALSE, results='hide'}
+###################################
+# Decision tree with Gridsearch
+######################################
+
+tree_para = {'criterion':['entropy'],'splitter':['best'],'max_depth':[16,18,20,25],"min_samples_leaf":[5,6,7]}
+clf = GridSearchCV(DecisionTreeClassifier(), tree_para, cv=5)
+
+tree = DecisionTreeClassifier(max_depth=20,min_samples_leaf=4) # to handle the imbalanced dataset
+tree.fit(X_train_prepared, y_train)
+```
+
+
+**Result of Analysis with Decision Tree
+
+```{python}
+import cv2 as cv
+
+
+dtg = cv.imread("DecisionTreeGridsearch.png")
+
+# Convert the image from BGR to RGB
+cut_dtg = cv.cvtColor(dtg, cv.COLOR_BGR2RGB)
+
+# Display the image using Matplotlib
+plt.imshow(cut_dtg)
+plt.axis('off')  # Hide axes
+plt.show()
+
+```
+
+The results are not good fit for our purpose. Even though training and testing score are not too bad, the relevant measures in the confusion matrix are not good enough. If there are only 6 patients correctly identified as patients with a risk for a stroke and in comparison 44 risk patients are incorrectly classified with no risk that is not fit for purpose and a huge risk factor for application in real-life health assessment. As somehow expected, the decision tree falls short when dealing with unbalanced data sets.
+
+A next step would be the use of Ensemble methods that can deal with imbalanced data sets like the random forest classifier. Ensembling 2000 decision trees, the Gridsearch can be improved and the imbalance compensated.
+The following code shows the implementation of random fores with 2000 decision trees, weight (balanced, max_depths=20 and minimal sample leaves of 20)
+
+**Code Random Forest**
+
+```{python,eval=FALSE, warning=FALSE, results='hide'}
+
+X, y = make_classification(n_samples=2000, n_features=13)
+clf = RandomForestClassifier(max_depth=20, random_state=42,min_samples_leaf=20,class_weight='balanced')
+clf.fit(X_train_prepared, y_train)
+
+print("\nTree:\ntraining score" , clf.score(X_train_prepared, y_train))
+y_train_pred = clf.predict(X_train_prepared)
+
+tn_train, fp_train, fn_train, tp_train = confusion_matrix(y_train,y_train_pred).ravel().tolist()
+print("TN:", tn_train,"FP:", fp_train,"FN:", fn_train,"TP:", tp_train)
+
+print("Tree: \ntest score" , clf.score(X_test_prepared, y_test))
+y_test_pred = clf.predict(X_test_prepared)
+tn, fp, fn, tp = confusion_matrix(y_test, y_test_pred).ravel().tolist()
+print("TN:", tn,"FP:", fp,"FN:", fn,"TP:",tp)
+# print("recall: ", recall_score(y_test, y_test_pred))
+
+print("confusion matrix: \n", confusion_matrix(y_test_pred, y_test))
+
+```
+
+
+**Confusion Matrix Random Forest**
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+rf = cv.imread("RandomForest.PNG")
+
+# Convert the image from BGR to RGB
+cut_rf = cv.cvtColor(rf, cv.COLOR_BGR2RGB)
+
+# Display the image using Matplotlib
+plt.imshow(cut_rf)
+plt.axis('off')  # Hide axes
+plt.show()
+
+```
+
+Tests show that only 10 peope were incorrectly categorised as healthy, while 40 people were correctly classified as risk patients for a stroke. Even though 193 were incorrectly classified as risk patients, their risk of misclassifictations were relatively minor in comparison to the False Negatives. These results showed a significant improvement to the Decision Tree analysis.
+
+However, in the initial analyses the dataset was  separated into 3 levels of glucose (low, medium, high). Interestingly, the correlations between glucose level and BMI completely reverse between high and low glucose groups. Glucose x BMI had a negative correlation while high glucose x BMI had a positive correlation. Thus, the role of the glucose level has been incorporated in a finel Random Forest Analysis.
+
+
+
+Bei der Analyse hat sich gezeigt, dass sich die Korrelation zwischen Glucose und BMI bei den Stroke Patienten umdrehen. Glucose level x BMI hatte eine negative Korrelation in der low glucose Gruppe, keine Korrelatin bei der normalen Gruppe, aber dann eine positive Korrelation bei der high glucose Gruppe. Damit diese Information beim Lernprozess berücksichtigt werden kann, aber ich eine One Hot Kodierung der 3 Gruppen der Glucosewerte durchgeführt und diese 3 Spalten an den bestehenden Datensatz angehangen. Darauf habe ich denselben RandomForestClassifier mit denselben Parametern angewandt und eine minimale Verbesserung bei der Erkennung erreicht.
+
+
+While the Random Forest Classification showed a significant improvement, a final analysis incorporated that additional glucose level classification.
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+import cv2 as cv
+rfg = cv.imread("RandomForestGlucoseSplit.PNG")
+
+# Convert the image from BGR to RGB
+cut_rfg = cv.cvtColor(rfg, cv.COLOR_BGR2RGB)
+
+# Display the image using Matplotlib
+plt.imshow(cut_rfg)
+plt.axis('off')  # Hide axes
+plt.show()
+
+```
+
+There has been a small, but crucial improvement in the results. 5 participants more have been correctly classified reducing the number of false negatives from 10 to 9. The number of false positives has been reduced by 3 people and there was 1 more patient that has been correctly identified as a risk patient for a stroke.
+
+
+```{python, echo=FALSE, warning=FALSE, results='hide'}
+import cv2 as cv
+featRF = cv.imread("FeatureImportanceRFC.PNG")
+
+# Convert the image from BGR to RGB
+cut_featRF = cv.cvtColor(featRF, cv.COLOR_BGR2RGB)
+
+# Display the image using Matplotlib
+plt.imshow(cut_featRF)
+plt.axis('off')  # Hide axes
+plt.show()
+
+```
+
+The feature importance unsurprisingly shows that age is by far the biggest risk factor for a stroke followed by glucose levels and BMIs.
+
+These results from our Machine Learning analysis are far from perfect and given the high risk of false negatives for patients, this model is also not fit for purpose. However with a highly imbalanced Dataset, the Random Forest Classifier with the glucose level classification returns the best results in this machine learning project.
+
+
+
