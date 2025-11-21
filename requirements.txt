@@ -1,0 +1,13 @@
+# Minimal Python dependencies for the MachineLearning_Stroke_DS project
+# Install with: py -3 -m pip install -r requirements.txt
+
+pandas>=1.5
+numpy>=1.24
+scikit-learn>=1.2
+seaborn>=0.12
+matplotlib>=3.6
+ipython>=8.0
+joblib>=1.2
+scipy>=1.10
+# Optional / dev
+jupyterlab>=3.0
