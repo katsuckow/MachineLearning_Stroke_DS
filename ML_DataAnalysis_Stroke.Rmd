@@ -1,8 +1,8 @@
 ---
 title: 'Machine Learning: Imbalanced Stroke Dataset'
 output:
-  html_document: default
   pdf_document: default
+  html_document: default
 date: "2025-11-19"
 ---
 
